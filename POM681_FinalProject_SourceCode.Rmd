@@ -1,0 +1,559 @@
+---
+title: "POM_681 Final Project"
+author: "Nandhini Vijayakumar,Suvidha Sharma, Akanksha Sahitya Bhupathiraju, Jyothi Pavan Kutala"
+date: "2025-05-01"
+output:
+  pdf_document: default
+  html_document: default
+---
+```{r}
+# Load libraries
+library(tidyverse)
+library(caret)
+library(e1071)      
+library(randomForest)
+library(xgboost)
+library(ROCR)
+library(pROC)
+library(smotefamily)        
+library(rpart)
+library(rpart.plot)
+library(corrplot)
+library(cluster)
+library(factoextra)
+library(ggplot2)
+library(patchwork)
+library(ggcorrplot)
+# Load dataset
+hr <- read.csv("/Users/nandhinivijayakumar/Downloads/WA_Fn-UseC_-HR-Employee-Attrition.csv")
+head(hr)
+
+```
+```{r}
+#..................................DATA CLEANING.........................................
+
+# Check for missing values
+colSums(is.na(hr))
+
+# Drop unnecessary columns (like EmployeeNumber, Over18, StandardHours, EmployeeCount — not useful)
+hr <- hr %>% select(-c(EmployeeNumber, Over18, StandardHours, EmployeeCount))
+
+hr <- hr %>%dplyr::mutate_if(is.character, as.factor)
+
+# Make Attrition a factor
+hr$Attrition <- as.factor(hr$Attrition)
+
+# Check structure
+str(hr)
+
+
+
+#....................................EDA (Exploratory Data Analysis).......................
+
+# Attrition distribution(checking data imbalance)
+table(hr$Attrition)
+prop.table(table(hr$Attrition))
+
+```
+
+```{r}
+# Plot 1: Attrition Class Distribution (Before SMOTE)
+ ggplot(hr, aes(x=Attrition, fill=Attrition)) +
+  geom_bar() +
+  ggtitle("Attrition Class Distribution (Before SMOTE)") +
+  theme_minimal() +
+  labs(x="Attrition Status", y="Count") +
+  scale_fill_manual(values=c("#00AFBB", "#FC4E07"))
+
+# Visualize Attrition by JobRole
+# Visualize Attrition by JobRole (fixed overlapping labels)
+ggplot(hr, aes(x = JobRole, fill = Attrition)) +
+  geom_bar(position = "fill") +
+  labs(title = "Attrition Rate by Job Role", x = "Job Role", y = "Proportion") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(hjust = 0.5, size = 14),
+    axis.title = element_text(size = 12)
+  ) +
+  scale_fill_manual(values = c("#00AFBB", "#FC4E07"))
+
+```
+```{r}
+# Create Age Groups
+hr$AgeGroup <- cut(hr$Age,
+                   breaks = c(18, 25, 35, 45, 55, 65),
+                   labels = c("18-25", "26-35", "36-45", "46-55", "56-65"),
+                   right = FALSE)
+```
+```{r}
+# Plot 2: Age Group vs Attrition
+p1 <- ggplot(hr, aes(x=AgeGroup, fill=Attrition)) +
+  geom_bar(position="fill") +
+  scale_y_continuous(labels=scales::percent) +
+  labs(title="Age Group vs Attrition", x="Age Group", y="Proportion") +
+  scale_fill_manual(values=c("#00AFBB", "#FC4E07")) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, size=14),
+        axis.title = element_text(size=12),
+        axis.text = element_text(size=10))
+
+# Plot 3: Marital Status vs Attrition
+p2 <- ggplot(hr, aes(x=MaritalStatus, fill=Attrition)) +
+  geom_bar(position="fill") +
+  scale_y_continuous(labels=scales::percent) +
+  labs(title="Marital Status vs Attrition", x="Marital Status", y="Proportion") +
+  scale_fill_manual(values=c("#00AFBB", "#FC4E07")) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, size=14),
+        axis.title = element_text(size=12),
+        axis.text = element_text(size=10))
+
+# Combine side-by-side using patchwork
+combined_plot <- (p1 | p2) +
+  plot_annotation(title = "Attrition Analysis by Age Group and Marital Status",
+                  theme = theme(plot.title = element_text(hjust = 0.5, size=16)))
+
+print(combined_plot)
+
+```
+```{r}
+##correlation matrix 
+
+library(dplyr)
+library(ggcorrplot)
+
+# Select only numeric columns and remove constant columns
+nums <- hr %>%
+  select_if(is.numeric) %>%
+  select(where(~ var(.x, na.rm = TRUE) != 0))
+
+# Compute correlation matrix
+corr <- round(cor(nums, use = "complete.obs"), 1)
+
+# Plot correlation matrix using ggcorrplot
+ggcorrplot(corr, 
+           type = "lower", 
+           lab = TRUE, 
+           lab_size = 2, 
+           method = "square", 
+           colors = c("red", "white", "skyblue"), 
+           title = "Correlation Matrix: Employee Attrition", 
+           hc.order = TRUE, 
+           hc.method = "complete", 
+           tl.cex = 6, 
+           outline.color = "black", 
+           ggtheme = theme_minimal() +
+             theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)))
+
+```
+
+
+
+```{r}
+
+#...................................Feature Engineering....................................
+
+# Create bins for DistanceFromHome
+hr$DistanceGroup <- cut(hr$DistanceFromHome,
+                        breaks = c(0, 5, 15, 30),
+                        labels = c("Near", "Medium", "Far"))
+
+# Create bins for MonthlyIncome
+hr$IncomeGroup <- cut(hr$MonthlyIncome,
+                      breaks = quantile(hr$MonthlyIncome, probs=c(0, 0.33, 0.66, 1)),
+                      labels = c("Low", "Medium", "High"),
+                      include.lowest = TRUE)
+
+#....................................Data Preprocessing.....................................
+# Prepare X and y
+# Data Preprocessing: Encode categorical variables
+#dummies <- dummyVars(Attrition ~ ., data = hr, fullRank = TRUE)
+#hr_transformed <- data.frame(predict(dummies, newdata = hr))
+#hr_transformed$Attrition <- ifelse(hr$Attrition == "Yes", 1, 0)
+#hr_transformed$Attrition <- as.factor(hr_transformed$Attrition)
+
+# ---------------------- Split Data ----------------------
+set.seed(999)
+trainIndex <- createDataPartition(hr$Attrition, p = 0.8, list = FALSE)
+train <- hr[trainIndex, ]
+test <- hr[-trainIndex, ]
+
+
+# ---------------------- SMOTE on Training Only ----------------------
+library(ROSE)
+train_new <- ROSE(Attrition ~ ., data = train, seed = 999)$data
+# Train/test split
+#train <- hr_balanced
+#X_train <- train %>% select(-Attrition)
+#y_train <- train$Attrition
+#smote_output <- SMOTE(X_train, y_train, K = 5)
+hr_balanced <- train_new
+```
+```{r}
+# Bar plot - After SMOTE
+ggplot(hr_balanced, aes(x=Attrition, fill=Attrition)) +
+  geom_bar() +
+  ggtitle("Attrition Class Distribution (After SMOTE)") +
+  theme_minimal() +
+  labs(x="Attrition Status", y="Count") +
+  scale_fill_manual(values=c("#00AFBB", "#FC4E07"))
+```
+
+```{r}
+
+
+#............................. [Logistic Regression].........................................
+
+# Fit the logistic regression model
+model_logit <- glm(Attrition ~ ., data=hr_balanced, family="binomial")
+summary(model_logit)
+
+# Get predictions as probabilities (type = "response")
+probabilities_rf <- predict(model_logit, newdata = test, type = "response")
+
+# Convert probabilities to binary predictions (using threshold 0.5)
+predictions_rf_class <- ifelse(probabilities_rf > 0.5, "Yes", "No")
+
+# Ensure both 'predictions_rf_class' and 'test$Attrition' are factors with the same levels
+test$Attrition <- factor(test$Attrition, levels = c("No", "Yes"))
+predictions_rf_class <- factor(predictions_rf_class, levels = c("No", "Yes"))
+
+# Create confusion matrix (indicating positive class as 'Yes')
+library(caret)
+conf_logit <- confusionMatrix(predictions_rf_class, test$Attrition, positive = 'Yes')
+
+# Print confusion matrix
+conf_logit
+# Create ROC object
+roc_logit <- roc(test$Attrition, probabilities_rf)
+
+# Prepare data
+df_logit <- data.frame(
+  fpr = 1 - roc_logit$specificities,
+  tpr = roc_logit$sensitivities
+)
+
+```
+
+```{r}
+# Plot
+ggplot(df_logit, aes(x=fpr, y=tpr)) +
+  geom_line(color="blue", size=1.2) +
+  geom_abline(intercept=0, slope=1, linetype="dashed", color="red") +
+  labs(title="ROC Curve - Logistic Regression",
+       x="False Positive Rate", y="True Positive Rate") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, size = 16),
+        axis.title = element_text(size = 14),
+        axis.text = element_text(size = 12)) +
+  annotate("rect", xmin = 0.7, xmax = 1, ymin = 0, ymax = 0.3,
+           fill = "white", color = "black", alpha = 0.8) +
+  annotate("text", x = 0.85, y = 0.15,
+           label = paste("AUC =", round(auc(roc_logit), 3)), size = 5)
+
+```
+```{r}
+#..................................[Decision Tree]................................................
+
+library(rpart)
+model_tree <- rpart(Attrition ~ ., data=hr_balanced, method="class")
+
+library(rpart.plot)
+# Set control parameters to make tree smaller
+control <- rpart.control(maxdepth = 4, minsplit = 30, cp = 0.006)
+prob_tree <- predict(model_tree, newdata=test, type="prob")[,2]
+conf_tree <- confusionMatrix(as.factor(predict(model_tree, newdata=test, type="class")), as.factor(test$Attrition))
+conf_tree
+
+# Build a new tree
+model_tree_simple <- rpart(Attrition ~ ., data=train, method="class", control=control)
+
+# Plot the simpler tree
+rpart.plot(model_tree_simple, extra = 106, fallen.leaves = TRUE)
+
+# Create ROC object
+roc_tree <- roc(test$Attrition, prob_tree)
+
+# Prepare data
+df_tree <- data.frame(
+  fpr = 1 - roc_tree$specificities,
+  tpr = roc_tree$sensitivities
+)
+```
+
+```{r}
+# Plot
+ggplot(df_tree, aes(x=fpr, y=tpr)) +
+  geom_line(color="orange", size=1.2) +
+  geom_abline(intercept=0, slope=1, linetype="dashed", color="red") +
+  labs(title="ROC Curve - Decision Tree",
+       x="False Positive Rate", y="True Positive Rate") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, size = 16),
+        axis.title = element_text(size = 14),
+        axis.text = element_text(size = 12)) +
+  annotate("rect", xmin = 0.7, xmax = 1, ymin = 0, ymax = 0.3,
+           fill = "white", color = "black", alpha = 0.8) +
+  annotate("text", x = 0.85, y = 0.15,
+           label = paste("AUC =", round(auc(roc_tree), 3)), size = 5)
+```
+#...........................................[SVM]..............................................
+```{r}
+model_svm <- svm(as.factor(Attrition) ~ ., data=hr_balanced, kernel="linear", probability=TRUE)
+summary(model_svm)
+
+# Predict classes
+pred_svm <- predict(model_svm, newdata=test, probability=TRUE)
+
+# Confusion Matrix
+conf_svm <- confusionMatrix(as.factor(pred_svm), as.factor(test$Attrition))
+conf_svm
+
+# Get probabilities
+prob_svm <- attr(predict(model_svm, newdata=test, probability=TRUE), "probabilities")[,2]
+
+# ROC Curve
+# Create ROC object
+roc_svm <- roc(test$Attrition, prob_svm)
+
+# Prepare data
+df_svm <- data.frame(
+  fpr = 1 - roc_svm$specificities,
+  tpr = roc_svm$sensitivities
+)
+```
+```{r}
+# Plot
+ggplot(df_svm, aes(x=fpr, y=tpr)) +
+  geom_line(color="purple", size=1.2) +
+  geom_abline(intercept=0, slope=1, linetype="dashed", color="red") +
+  labs(title="ROC Curve - SVM",
+       x="False Positive Rate", y="True Positive Rate") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, size = 16),
+        axis.title = element_text(size = 14),
+        axis.text = element_text(size = 12)) +
+  annotate("rect", xmin = 0.7, xmax = 1, ymin = 0, ymax = 0.3,
+           fill = "white", color = "black", alpha = 0.8) +
+  annotate("text", x = 0.85, y = 0.15,
+           label = paste("AUC =", round(auc(roc_svm), 3)), size = 5)
+```
+```{r}
+#.....................................[Random Forest].......................................
+library(caret)
+library(randomForest)
+library(dplyr)
+library(ggplot2)
+
+table(train$Attrition)
+
+# Set up training control
+train_control <- trainControl(method = "cv", number = 5)
+
+# Train model using caret with method = 'rf'
+model_rf <- train(as.factor(Attrition) ~ ., 
+                  data = hr_balanced, 
+                  method = "rf", 
+                  trControl = train_control)
+
+# Get variable importance
+importance_rf <- varImp(model_rf)$importance
+
+# Convert rownames to a proper column for plotting
+importance_rf <- importance_rf %>%
+  mutate(Variable = rownames(.)) %>%
+  arrange(desc(Overall)) %>%
+  top_n(10, Overall)  # Optional: top 10 variables
+
+# Plot variable importance
+ggplot(importance_rf, aes(x = reorder(Variable, Overall), y = Overall)) +
+  geom_col(fill = "#00AFBB") +
+  coord_flip() +
+  labs(title = "Top 10 Important Variables - Random Forest",
+       x = "Variables", y = "Importance (Overall)") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.3, size = 10),
+        axis.title = element_text(size = 9),
+        axis.text = element_text(size = 9))
+
+
+# Predict Probabilities for Random Forest
+prob_rf <- predict(model_rf, newdata=test %>% select(-Attrition), type="prob")[,2]
+pred_rf <- predict(model_rf, newdata=test %>% select(-Attrition))
+conf_rf <- confusionMatrix(as.factor(pred_rf), as.factor(test$Attrition))
+conf_rf
+
+
+# ROC Curve for Random Forest
+prob_rf <- predict(model_rf, test, type = "prob")[, 2]  # Probability of 'Yes'
+roc_rf <- roc(test$Attrition, prob_rf, percent = FALSE)
+
+```
+```{r}
+plot.roc(roc_rf,
+         print.auc = TRUE,
+         auc.polygon = TRUE,
+         grid = c(0.1, 0.2),
+         grid.col = c("green", "red"),
+         max.auc.polygon = TRUE,
+         auc.polygon.col = "lightblue",
+         print.thres = TRUE,
+         main = 'ROC Curve - Random Forest')
+
+```
+```{r}
+# .......................................[XGBoost]..............................................
+
+# Define cross-validation control
+cvcontrol <- trainControl(
+  method = "repeatedcv",             # Use repeated cross-validation
+  number = 5,                        # 5-fold CV
+  repeats = 1,                       # Repeat CV 3 times
+  classProbs = TRUE,                 # Enable class probabilities
+  summaryFunction = twoClassSummary, # Use AUC as the performance metric
+  search = "random"                  # Randomized search
+)
+# Replace invalid characters with underscores and ensure valid factor names
+levels(train$Attrition) <- make.names(levels(train$Attrition))
+
+# Perform Randomized Search with fewer hyperparameter combinations
+set.seed(123)
+model_xgb <- train(as.factor(Attrition) ~ .,                     
+                   data = hr_balanced,         
+                   method = "xgbTree",               
+                   trControl = cvcontrol,             
+                   tuneLength = 10,                   
+                   metric = "ROC"                    
+)
+
+# Print the best model parameters
+print(model_xgb$bestTune)
+
+
+# Plot the top 15 variable importance
+var_imp <- varImp(model_xgb, scale = TRUE)
+top_15_vars <- head(var_imp$importance, 15)
+```
+```{r}
+# Install or update lime package
+
+library(lime)
+library(xgboost)
+library(caret)
+library(tidyverse)
+library(gridExtra)
+
+# Create the LIME explainer object
+explainer_xgb <- lime::lime(hr_balanced[, -which(names(hr_balanced) == "Attrition")], model_xgb)
+
+# Choose 4 different test samples (or rows from your test dataset)
+test_samples <- test[1:2, -which(names(test) == "Attrition")]
+
+# Create the explanations for each of the 2 test samples
+explanations <- lapply(1:2, function(i) {
+  lime::explain(test_samples[i, , drop = FALSE], explainer_xgb, n_labels = 1, n_features = 7)
+})
+
+# Generate the LIME plots for feature importances
+plots <- lapply(explanations, function(explanation) {
+  lime::plot_features(explanation)  # Make sure this generates the feature importance plot
+})
+
+ plot1 <- lime::plot_features(explanations[[1]])
+ plot2 <- lime::plot_features(explanations[[2]])
+
+ combined_plots <- plot1 + plot2 + plot_layout(ncol = 2)
+ print(combined_plots)
+ 
+ grid_plots <- wrap_plots(combined_plots, ncol = 1, nrow = 4) 
+ 
+```
+
+
+```{r}
+# Plot variable importance
+ggplot(top_15_vars, aes(x = reorder(rownames(top_15_vars), Overall), y = Overall)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  xlab("Variables") + 
+  ylab("Importance") +
+  ggtitle("Top 15 Variable Importance")
+```
+```{r}
+# Get the model predictions
+prob_pred <- predict(model_xgb, newdata = test, type = "prob")[,2]
+
+roc_xgb <- roc(test$Attrition, prob_pred, percent = FALSE)
+```
+```{r}
+plot.roc(roc_xgb,
+         print.auc = TRUE,
+         auc.polygon = TRUE,
+         grid = c(0.1, 0.2),
+         grid.col = c("green", "red"),
+         max.auc.polygon = TRUE,
+         auc.polygon.col = "lightblue",
+         print.thres = TRUE,
+         main = 'ROC Curve - XGBoost')
+
+```
+```{r}
+# Predict Probabilities for XGB
+prob_xgb <- predict(model_xgb, newdata=test, type="prob")[,2]
+pred_xgb <- predict(model_xgb, newdata=test )
+conf_xgb <- confusionMatrix((pred_xgb), (test$Attrition))
+conf_xgb
+```
+```{r}
+
+#.........................................Final Summary Table.............................
+
+results_final <- data.frame(
+  Model = c("Random Forest", "Logistic Regression", "XGBoost", "SVM", "Decision Tree"),
+  
+  AUC = round(c(
+    auc(roc_rf),
+    auc(roc_logit),
+    auc(roc_xgb),
+    auc(roc_svm),
+    auc(roc_tree)
+  ), 3),
+  
+  Accuracy = round(c(
+    conf_rf$overall["Accuracy"],
+    conf_logit$overall["Accuracy"],
+    conf_xgb$overall["Accuracy"],
+    conf_svm$overall["Accuracy"],
+    conf_tree$overall["Accuracy"]
+  ), 3),
+  
+  Sensitivity = round(c(
+    conf_rf$byClass["Sensitivity"],
+    conf_logit$byClass["Sensitivity"],
+    conf_xgb$byClass["Sensitivity"],
+    conf_svm$byClass["Sensitivity"],
+    conf_tree$byClass["Sensitivity"]
+  ), 3),
+  
+  Specificity = round(c(
+    conf_rf$byClass["Specificity"],
+    conf_logit$byClass["Specificity"],
+    conf_xgb$byClass["Specificity"],
+    conf_svm$byClass["Specificity"],
+    conf_tree$byClass["Specificity"]
+  ), 3),
+  
+  Balanced_Accuracy = round(c(
+    conf_rf$byClass["Balanced Accuracy"],
+    conf_logit$byClass["Balanced Accuracy"],
+    conf_xgb$byClass["Balanced Accuracy"],
+    conf_svm$byClass["Balanced Accuracy"],
+    conf_tree$byClass["Balanced Accuracy"]
+  ), 3)
+)
+
+# View final beautiful table
+print(results_final)
+
+```
